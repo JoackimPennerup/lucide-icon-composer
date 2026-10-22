@@ -2,3 +2,8 @@ node_modules/
 dist/
 .playwright-mcp/
 *.tsbuildinfo
+playwright-report/
+test-results/
+.test-tmp/
+/public/lucide-catalog.json
+/public/lucide-icons/

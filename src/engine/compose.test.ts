@@ -107,6 +107,35 @@ describe('SVG composition geometry', () => {
     assertVisibleGap(moved, 0);
   });
 
+  it('recomputes a scaled modifier without changing its exported stroke width', () => {
+    const model = input(svg(line(2, 12, 22, 12)), svg(line(12, 2, 12, 22)), 1.5);
+    const full = composeIcon(model);
+    model.placement.scale = 0.5;
+    const scaled = composeIcon(model);
+    expect(scaled.svg).not.toBe(full.svg);
+    expect(scaled.svg).toContain('stroke-width="2"');
+    expect(scaled.modifierBounds?.height).toBeCloseTo((full.modifierBounds?.height ?? 0) / 2, 3);
+    assertVisibleGap(scaled, 1.5);
+  });
+
+  it('keeps the temporary drag preview stroke-aware without changing exact output', () => {
+    const model = input(svg(line(2, 12, 22, 12)), svg(line(12, 2, 12, 22)));
+    const exact = composeIcon(model);
+    const preview = composeIcon(model, { preview: true });
+    assertVisibleGap(preview, 2);
+    expect(composeIcon(model).svg).toBe(exact.svg);
+  });
+
+  it('preserves original Lucide round dots made from tiny paths and coincident lines', () => {
+    const model = input(subjects.file, svg(line(2, 2, 2, 2)));
+    model.modifierSvg = null;
+    const tiny = svg('<path d="M6 8h.01"/><line x1="12" y1="16" x2="12" y2="16"/>');
+    model.subjectSvg = tiny;
+    const result = composeIcon(model);
+    expect(result.subjectPaths).toHaveLength(2);
+    expect(result.svg).toContain('stroke-width="2"');
+  });
+
   it('is deterministic and exports only minimal stroke paths', () => {
     const model = input(subjects.file, modifiers.plus);
     model.placement.anchor = 'bottom-right';

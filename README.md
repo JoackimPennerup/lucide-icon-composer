@@ -1,49 +1,65 @@
-# Lucide Icon Composer — Phase 1 geometry proof
+# Lucide Icon Designer
 
-This repository contains the standalone SVG composition engine and a React/Vite inspection harness. It demonstrates real cutouts for File + Add, Folder + Check, and User + Remove, plus two more Lucide combinations. The editor workflow in the brief is Phase 2 and is deliberately not claimed as complete here.
+A manual SVG composition tool for 24×24 Lucide icons. Any canonical icon in the pinned `lucide-static` package can be a subject or modifier. Place the modifier and export real stroke-path cutouts. The existing Phase 1 geometry proof remains available from **Geometry inspection**.
 
-## Run
+## Run and verify
 
-Requires Node.js 22.12 or later.
+Requires Node.js 22.12 or later. The browser interaction suite uses an installed Google Chrome.
 
 ```sh
 npm install
 npm run dev
+npm test
+npm run test:browser
+npm run build
+npm run audit:lucide
+npm run profile:geometry
 ```
 
-Open the local URL printed by Vite. Change the example, clearance, scale, or offsets to see the original source paths, exclusion zone, and trimmed output update. `npm test` runs geometry and raster visual regression tests; `npm run build` checks TypeScript and produces the production bundle.
+Open the local URL printed by Vite. `npm test` covers the geometry engine, validation, source parsing, state, and existing raster regressions. `npm run test:browser` covers pointer, touch, keyboard, import/export, and canvas screenshots. The screenshot baselines in `test/browser/editor.spec.ts-snapshots` are generated on Windows. To review intentional visual changes, run `npm run test:browser -- --update-snapshots`, inspect the images, then run the regular suite again. To refresh the Phase 1 raster baselines, set `UPDATE_VISUALS=1` before `npm test`.
 
-To intentionally refresh the six visual baselines after reviewing a change, run `UPDATE_VISUALS=1 npm test` in a POSIX shell or `$env:UPDATE_VISUALS='1'; npm test` in PowerShell. Then run the regular tests again.
+## Editing
 
-## Engine contract
+- Open either icon picker to search the complete installed Lucide library by name, alias, or official tag. Its grid supports mouse, touch, Tab, arrow keys, Home/End, Enter, and Escape. Subject and modifier selections are independent. Click the canvas or the **Subject / Modifier** buttons to select a layer.
+- Drag the modifier. The 24×24 coordinates stay stable under zoom and pan. Drag empty canvas to pan; **Pan** also lets you drag anywhere. **Fit** and **Reset view** restore useful views.
+- **Grid** controls the visible grid; **Snap** controls placement separately. Choose 1, 0.5, or 0.25 units. Hold Alt during a drag for unsnapped placement. The modifier's reference point snaps; its paths remain rigid.
+- Focus the canvas and use arrow keys to move the selected modifier by one grid step. Shift+arrow moves 2 units; Alt+arrow moves 0.1. Delete or Backspace removes it. Escape cancels a drag. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z redoes. Text fields keep their native keyboard behavior.
+- Use X/Y fields for unsnapped positions, the anchor selector for presets, and the scale and visible-clearance controls for refinement. Modifier geometry scales around its source bounds center while the rendered stroke stays 2 units wide.
+- Review 16, 24, 32, and 48 pixel previews on light or dark backgrounds. Open a guidance item to highlight affected paths; toggle safe-area and cutout-area overlays as needed. These guides never appear in exports.
+- Copy or download the finished SVG. Save an editable JSON project and reopen it later. A drag is one history action; composition data is stored without canvas zoom or panel state.
 
-[`composeIcon`](src/engine/compose.ts) accepts two SVG strings and a declarative placement/composition model. It creates a fresh Paper.js scope per call, parses Lucide stroke primitives, moves the modifier without altering its source SVG, trims subject paths, and returns a standalone 24×24 SVG. No React or browser DOM API is used by the engine. The result also includes path data, warnings, and an exclusion-zone SVG for inspection.
+## Architecture
 
-The model supports `cutout` and `overlay` today. `replace` is explicitly rejected until it has defined semantics. The source strings remain in the model, so recomposition from the same input is deterministic.
+`src/engine/compose.ts` is a React-independent Paper.js engine. It accepts source SVG strings and a placement/composition model, makes a fresh Paper scope, scales and positions the modifier, trims subject paths, and returns a standalone SVG plus path data for previews. The original sources in the composition document remain unchanged. `src/editor/document.ts` holds the versioned editable model and validates imported JSON. `src/engine/guidelines.ts` performs separate technical, geometric, and advisory checks. `src/editor/Editor.tsx` handles UI state and direct manipulation; `src/editor/placement.ts` handles coordinate conversion and snapping; `src/editor/history.ts` holds undo/redo state.
 
-## Geometry and tolerance
+### Full Lucide library
 
-Source paths remain centerlines. For each subject point, the engine queries the nearest point on every transformed modifier path. It removes portions whose centerlines fall inside this exclusion radius:
+The `lucide-static` version is pinned in `package.json`. Before development, tests, and builds, `scripts/generate-lucide-catalog.mjs` reads that installed package's canonical names from `icon-nodes.json`, search tags from `tags.json`, and SVGs from `icons/`. It compares identical SVG geometry to map package aliases to their canonical names. The generated catalog and canonical SVG copies live under `public/` and are ignored by Git. No list of individual icons is maintained by hand.
+
+The browser fetches the small catalog only when a picker opens. Search filters names, aliases, and official tags. The scrollable grid renders only nearby rows, and thumbnails use local SVG URLs with lazy image loading. On selection, `src/library/catalog.ts` fetches and caches that icon's full original SVG. Browsing does not run the cutout engine. The build copies the same local assets into `dist`; it uses no CDN. If you deliberately update `lucide-static`, run `npm install` followed by `npm run prepare:icons` or any dev/test/build command. That regenerates the catalog and assets for the installed version.
+
+Editable JSON schema version 3 stores each canonical icon name, the installed Lucide version, and both complete original SVG sources. Embedded sources reproduce existing work even when the installed library changes. Version 1 and 2 projects still reopen; their unknown source version is marked `unknown` until a new library icon is selected.
+
+The engine calculates a centerline exclusion radius of:
 
 `subject stroke radius + modifier stroke radius + requested visible clearance + numerical margin`
 
-For default 2px strokes and 2px visible clearance, the centerline exclusion radius is **4.015px**: 1px for each stroke radius, 2px of visible space, and 0.015px numerical margin. A newly cut round cap is already part of the subject's 1px stroke radius, so adding it again would overcut. The visible gap is at least the requested value; the 0.015px margin makes it slightly larger at a cut boundary.
+For default 2px strokes and 2px visible clearance, the exact radius is **4.015px**. A newly cut round cap is included in the subject's 1px stroke radius. The exact engine scans subject paths at up to 0.025px intervals, refines boundaries to 0.0001px, and removes cut-created fragments shorter than 0.18px. Original tiny Lucide dot strokes remain intact. Geometry tests check visible edge gaps within 0.03px on straight and curved strokes, closed shapes, and real Lucide icons.
 
-The subject is scanned at no more than 0.025px along arc length. Crossings are refined by bisection to 0.0001px. The 0.015px inflation covers an undetected local distance dip between samples (at most half a sample step because point-to-curve distance is 1-Lipschitz along the subject) plus rounding. Fragments shorter than 0.18px are removed. The automated tests verify centerline-derived visible gaps within 0.03px on lines, Bézier curves, circles, rounded rectangles, and real Lucide icons. This is a minimum-gap guarantee, not an exact-gap fit.
+Drag updates are coalesced with `requestAnimationFrame`. The temporary drag preview scans at 0.25px and increases its safety margin to 0.14px; on release the engine recomputes at exact quality. Copy and download use the exact result and are unavailable during a drag. `npm run profile:geometry` measures both modes. On the development machine, simple pairs took roughly 1–2 ms per preview; the dense Calendar + Pencil pair took about 49 ms per preview and 452 ms for its exact result. These are measurements, not hard limits across machines.
 
-Paper.js splitting preserves surviving line and Bézier segments as stroked vector paths. SVG arcs, circles, ellipses, and rounded rectangles are internally represented as cubic curves; their exported geometry stays stroke based. The export contains paths only, with 2px round strokes and no masks, filled outline conversions, raster images, or background-colored overlays.
+## Validation and source safety
 
-## Library choice
+The editor separates **errors**, **warnings**, and **suggestions**. Technical checks cover the 24×24 SVG contract, 2-unit round strokes, supported elements and attributes, path validity, and export validity. Geometric checks cover rendered stroke extents, visible subject–modifier spacing, tiny fragments, off-canvas modifiers, and major subject removal. Silhouette and small-scale guidance remains advisory. Warnings do not move the designer's geometry or prevent export.
 
-**Paper.js** offers SVG-style path data, cubic curves, nearest-point queries, path length, and curve splitting in JavaScript. Those operations let this first proof cut the original centerlines and keep a compact Lucide-style export. Its filled-area Boolean operations alone do not solve stroke-aware centerline trimming.
+Imported SVG sources pass a strict XML allowlist in `src/engine/strictSvg.ts`. It rejects scripts, events, entities, transforms, masks, filters, images, unsupported attributes, and nested markup. It supports the installed collection's compact SVG arc flags, tiny round-cap dots, and small filled circles whose interiors are fully covered by their 2px strokes. Source SVG text remains unchanged in editable projects. The editor and proof harness render parsed path data through React SVG elements. Source markup is never inserted directly into the DOM. The exported SVG contains only stroked paths, with no masks, clipping paths, raster content, or background overlays. `npm run audit:lucide` parses every canonical icon and reports failures by name and reason; the current pinned version has **zero** parse failures.
 
-**Skia PathKit** provides robust stroke expansion and filled-path Boolean operations, but subtracting expanded outlines would export filled shapes. Recovering clean original stroke centerlines afterward is a separate geometry problem. It also adds a WASM dependency. PathKit remains a useful candidate if a later iteration needs exact exclusion-region Booleans or pathological intersections.
+## Limits and next steps
 
-References: [Lucide design language](https://lucide.dev/contribute/icons/design-principles), [Paper.js path API](https://paperjs.org/reference/path/), [Skia PathKit documentation](https://skia.googlesource.com/skia/+/main/site/docs/user/modules/pathkit.md). Original icon SVGs come from `lucide-static` under the [ISC license](https://github.com/lucide-icons/lucide/blob/main/LICENSE).
+- Input is limited to untransformed, undashed Lucide geometry with a 24×24 viewBox and 2px round strokes. Supported primitives are paths, lines, circles, ellipses, rectangles, polylines, and polygons. Filled circles are allowed only when the 2px stroke already covers their interior.
+- The current package provides 1,877 canonical icons and 264 searchable aliases. Every canonical source parses, but not every pair is visually suitable or guaranteed to compose at every placement. An engine failure appears as an error while the editable project remains saveable.
+- The cutout engine favors a safe minimum visible gap. Very dense, self-intersecting, or nearly tangent geometry still deserves visual review at actual size.
+- Dense icons can pause briefly when the final exact cutout is computed. A worker or geometry acceleration is the next performance improvement for unrestricted library use.
+- Visual guidance cannot decide whether the icon's meaning or optical balance is right. The designer makes those decisions.
 
-## Current limits
-
-- Input must be untransformed, undashed, stroke-only Lucide geometry on a 24×24 viewBox with 2px strokes. Paths, lines, circles, ellipses, rectangles, polylines, and polygons are handled. Unsupported masks, images, filters, transforms, and nonstandard stroke widths raise an error.
-- Very short safe fragments are intentionally discarded. Dense, self-intersecting, or nearly tangent geometry should be reviewed visually; the sampling/margin strategy prioritizes a safe minimum gap over the smallest possible cut.
-- The harness visualizes the exclusion radius as a wide red stroke. That guide is never included in the exported composite SVG.
-- The Phase 1 harness is for inspecting the engine. Searchable selectors, direct drag placement, JSON/SVG downloads, and the full output panel belong to Phase 2.
+References: [Lucide design principles](https://lucide.dev/contribute/icons/design-principles), [Paper.js path API](https://paperjs.org/reference/path/). Source icons are from `lucide-static` under the [ISC license](https://github.com/lucide-icons/lucide/blob/main/LICENSE).

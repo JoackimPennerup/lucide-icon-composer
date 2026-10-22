@@ -4,17 +4,28 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prepare:icons": "node scripts/generate-lucide-catalog.mjs",
+    "predev": "npm run prepare:icons",
     "dev": "vite",
+    "prebuild": "npm run prepare:icons",
     "build": "tsc -b && vite build",
-    "test": "vitest run"
+    "postbuild": "node scripts/check-icon-build.mjs",
+    "pretest": "npm run prepare:icons",
+    "test": "vitest run",
+    "pretest:browser": "npm run prepare:icons",
+    "test:browser": "playwright test",
+    "profile:geometry": "node scripts/profile-geometry.mjs",
+    "audit:lucide": "node scripts/audit-lucide.mjs"
   },
   "dependencies": {
+    "@xmldom/xmldom": "^0.9.12",
     "lucide-static": "1.55.0",
     "paper": "0.12.18",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@resvg/resvg-js": "^2.6.2",
     "@types/pixelmatch": "^5.2.6",
     "@types/pngjs": "^6.0.5",

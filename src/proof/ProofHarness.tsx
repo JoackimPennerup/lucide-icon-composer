@@ -9,8 +9,10 @@ function Preview({ label, layer, note }: { label: string; layer: React.ReactNode
   </section>;
 }
 
-function SvgLayer({ svg, className = '' }: { svg: string; className?: string }) {
-  return <div className={`svg-layer ${className}`} dangerouslySetInnerHTML={{ __html: svg }} />;
+function SvgLayer({ paths, className = '', strokeWidth = 2 }: { paths: string[]; className?: string; strokeWidth?: number }) {
+  return <div className={`svg-layer ${className}`}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+    {paths.map((d, index) => <path key={index} d={d} />)}
+  </svg></div>;
 }
 
 export function ProofHarness() {
@@ -63,9 +65,9 @@ export function ProofHarness() {
       <div className="inspection">
         <div className="section-title"><span>02</span><h2>Geometry inspection</h2></div>
         <div className="preview-grid">
-          <Preview label="Original" note="Uncut source paths" layer={<><SvgLayer svg={result.subjectSvg} className="subject" /><SvgLayer svg={result.modifierSvg} className="modifier" /></>} />
-          <Preview label="Exclusion" note={`Centerline threshold ${result.exclusionRadius.toFixed(2)} px`} layer={<><SvgLayer svg={result.subjectSvg} className="subject faded" /><SvgLayer svg={result.exclusionSvg} className="exclusion" /><SvgLayer svg={result.modifierSvg} className="modifier" /></>} />
-          <Preview label="Result" note="Trimmed centerlines" layer={<SvgLayer svg={result.svg} className="result" />} />
+          <Preview label="Original" note="Uncut source paths" layer={<><SvgLayer paths={result.originalSubjectPaths} className="subject" /><SvgLayer paths={result.modifierPaths} className="modifier" /></>} />
+          <Preview label="Exclusion" note={`Centerline threshold ${result.exclusionRadius.toFixed(2)} px`} layer={<><SvgLayer paths={result.originalSubjectPaths} className="subject faded" /><SvgLayer paths={result.modifierPaths} strokeWidth={result.exclusionRadius * 2} className="exclusion" /><SvgLayer paths={result.modifierPaths} className="modifier" /></>} />
+          <Preview label="Result" note="Trimmed centerlines" layer={<SvgLayer paths={[...result.subjectPaths, ...result.modifierPaths]} className="result" />} />
         </div>
         <div className="details">
           <div><span className="detail-label">Subject fragments</span><strong>{result.subjectPaths.length}</strong></div>
@@ -80,6 +82,6 @@ export function ProofHarness() {
       <p>Stroke geometry only. No masks, overlays, clipping paths, or raster data.</p>
       <pre><code>{result.svg}</code></pre>
     </section>
-    <footer>Phase 1 checks the cutout geometry before the full editor workflow.</footer>
+    <footer>Advanced geometry inspection for the editor's precise cutout engine.</footer>
   </main>;
 }

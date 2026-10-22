@@ -1,11 +1,13 @@
 import paper from 'paper';
+import { parseStrictSvg } from './strictSvg';
+import { normalizePathData } from './pathData';
 
 export type Anchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center';
 export type CompositionMode = 'cutout' | 'overlay' | 'replace';
 
 export interface CompositionInput {
   subjectSvg: string;
-  modifierSvg: string;
+  modifierSvg: string | null;
   placement: { anchor: Anchor; offsetX: number; offsetY: number; scale: number };
   composition: { mode: CompositionMode; clearance: number };
 }
@@ -15,9 +17,11 @@ export interface CompositionResult {
   subjectSvg: string;
   modifierSvg: string;
   exclusionSvg: string;
+  originalSubjectPaths: string[];
   subjectPaths: string[];
   modifierPaths: string[];
   exclusionRadius: number;
+  modifierBounds: { x: number; y: number; width: number; height: number } | null;
   warnings: string[];
 }
 
@@ -34,52 +38,34 @@ function numberAttr(attrs: Record<string, string>, name: string, fallback = 0): 
   return Number.isFinite(value) ? value : fallback;
 }
 
-function parseAttributes(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  for (const match of raw.matchAll(/([\w:-]+)\s*=\s*(["'])(.*?)\2/g)) attrs[match[1]] = match[3];
-  return attrs;
-}
-
 /** Parses the untransformed, stroke-only primitives used by Lucide. */
 export function parseLucideSvg(scope: Scope, svg: string): Path[] {
-  const root = svg.match(/<svg\b([^>]*)>/i);
-  if (!root) throw new Error('Expected an SVG root element.');
-  const rootAttrs = parseAttributes(root[1]);
-  if (rootAttrs.viewBox && rootAttrs.viewBox.trim().replace(/[\s,]+/g, ' ') !== '0 0 24 24') {
-    throw new Error('Only a 0 0 24 24 viewBox is supported.');
-  }
-  if (rootAttrs['stroke-width'] && Number(rootAttrs['stroke-width']) !== STROKE_WIDTH) {
-    throw new Error('Only 2px source strokes are supported.');
-  }
-  if (/\btransform\s*=|\bstroke-dasharray\s*=/i.test(svg)) {
-    throw new Error('Transforms and dashed strokes are not yet supported.');
-  }
-  if (/<(?:script|foreignObject|image|use|mask|clipPath|filter)\b/i.test(svg)) {
-    throw new Error('Unsupported SVG element. Only stroke-based Lucide primitives are accepted.');
-  }
   const paths: Path[] = [];
-  for (const match of svg.matchAll(/<(path|line|circle|ellipse|rect|polyline|polygon)\b([^>]*)\/?\s*>/gi)) {
-    const tag = match[1].toLowerCase();
-    const attrs = parseAttributes(match[2]);
-    if (attrs.transform) throw new Error('SVG transforms are not yet supported.');
+  for (const { tag, attrs } of parseStrictSvg(svg)) {
     let path: Path;
     switch (tag) {
       case 'path': {
         const d = attrs.d;
         if (!d) continue;
-        const compound = new scope.CompoundPath({ pathData: d, insert: false });
+        const compound = new scope.CompoundPath({ pathData: normalizePathData(d), insert: false });
         for (const child of [...compound.children]) {
           const detached = child.clone({ insert: false }) as Path;
           paths.push(detached);
         }
         continue;
       }
-      case 'line':
+      case 'line': {
+        const x1 = numberAttr(attrs, 'x1');
+        const y1 = numberAttr(attrs, 'y1');
+        const x2 = numberAttr(attrs, 'x2');
+        const y2 = numberAttr(attrs, 'y2');
+        // Lucide uses coincident line endpoints for round dots. Paper needs a
+        // nonzero centerline to retain and export them; 0.01px is imperceptible.
         path = new scope.Path.Line({
-          from: [numberAttr(attrs, 'x1'), numberAttr(attrs, 'y1')],
-          to: [numberAttr(attrs, 'x2'), numberAttr(attrs, 'y2')], insert: false,
+          from: [x1, y1], to: x1 === x2 && y1 === y2 ? [x1 + 0.01, y1] : [x2, y2], insert: false,
         });
         break;
+      }
       case 'circle':
         path = new scope.Path.Circle({ center: [numberAttr(attrs, 'cx'), numberAttr(attrs, 'cy')], radius: numberAttr(attrs, 'r'), insert: false });
         break;
@@ -140,10 +126,15 @@ function boundary(path: Path, modifiers: Path[], radius: number, a: number, b: n
   return aSafe ? a : b;
 }
 
-function safeIntervals(path: Path, modifiers: Path[], radius: number): [number, number][] {
+function safeIntervals(path: Path, modifiers: Path[], radius: number, sampleStep = SAMPLE_STEP): [number, number][] {
   const length = path.length;
-  if (length <= MIN_FRAGMENT) return [];
-  const count = Math.max(1, Math.ceil(length / SAMPLE_STEP));
+  // Lucide uses 0.01px centerline strokes as visible round dots. Preserve an
+  // intact source dot unless it falls within the modifier's exclusion area.
+  if (length <= MIN_FRAGMENT) {
+    const safe = distanceToModifier(pointAt(path, length / 2), modifiers) >= radius + length / 2;
+    return safe ? [[0, length]] : [];
+  }
+  const count = Math.max(1, Math.ceil(length / sampleStep));
   const intervals: [number, number][] = [];
   let previousOffset = 0;
   let previousSafe = distanceToModifier(pointAt(path, 0), modifiers) >= radius;
@@ -187,7 +178,7 @@ function anchorPoint(scope: Scope, anchor: Anchor): paper.Point {
 }
 
 /** Pure input/output composition; PaperScope and all geometry are local to each call. */
-export function composeIcon(input: CompositionInput): CompositionResult {
+export function composeIcon(input: CompositionInput, options: { preview?: boolean } = {}): CompositionResult {
   const { placement, composition } = input;
   if (!Number.isFinite(placement.scale) || placement.scale <= 0 || placement.scale > 3) throw new Error('Scale must be between 0 and 3.');
   if (!Number.isFinite(composition.clearance) || composition.clearance < 0 || composition.clearance > 4) throw new Error('Clearance must be between 0 and 4.');
@@ -195,12 +186,14 @@ export function composeIcon(input: CompositionInput): CompositionResult {
   const scope = new paper.PaperScope();
   scope.setup(new scope.Size(24, 24));
   const subject = parseLucideSvg(scope, input.subjectSvg);
-  const modifier = parseLucideSvg(scope, input.modifierSvg);
-  const bounds = modifier.reduce((all, path) => all.unite(path.bounds), modifier[0].bounds.clone());
-  const target = anchorPoint(scope, placement.anchor).add(new scope.Point(placement.offsetX, placement.offsetY));
-  for (const path of modifier) {
-    path.scale(placement.scale, bounds.center);
-    path.translate(target.subtract(bounds.center));
+  const modifier = input.modifierSvg ? parseLucideSvg(scope, input.modifierSvg) : [];
+  if (modifier.length) {
+    const bounds = modifier.reduce((all, path) => all.unite(path.bounds), modifier[0].bounds.clone());
+    const target = anchorPoint(scope, placement.anchor).add(new scope.Point(placement.offsetX, placement.offsetY));
+    for (const path of modifier) {
+      path.scale(placement.scale, bounds.center);
+      path.translate(target.subtract(bounds.center));
+    }
   }
 
   const warnings: string[] = [];
@@ -209,35 +202,43 @@ export function composeIcon(input: CompositionInput): CompositionResult {
   // centerline, including at newly cut endpoints. The two stroke radii are
   // therefore counted once each when turning visible edge gap into a
   // centerline distance. A small margin covers sampling and path rounding.
-  const exclusionRadius = STROKE_WIDTH / 2 + STROKE_WIDTH / 2 + composition.clearance + NUMERICAL_MARGIN;
+  // A wider sample and matching radius margin keep pointer previews responsive.
+  // Every committed result and SVG export use the precise defaults above.
+  const sampleStep = options.preview ? 0.25 : SAMPLE_STEP;
+  const margin = options.preview ? 0.14 : NUMERICAL_MARGIN;
+  const exclusionRadius = STROKE_WIDTH / 2 + STROKE_WIDTH / 2 + composition.clearance + margin;
   if (composition.mode === 'replace') throw new Error('Replace mode is reserved for a future version.');
   if (composition.mode === 'overlay') outputSubject.push(...subject);
   else {
     for (const path of subject) {
-      const intervals = safeIntervals(path, modifier, exclusionRadius);
+      const intervals = safeIntervals(path, modifier, exclusionRadius, sampleStep);
       for (const [start, end] of intervals) {
         const piece = extractInterval(path, start, end);
-        if (piece && piece.length >= MIN_FRAGMENT) outputSubject.push(piece);
+        if (piece && (piece.length >= MIN_FRAGMENT || path.length <= MIN_FRAGMENT)) outputSubject.push(piece);
       }
     }
   }
   if (outputSubject.length === 0) warnings.push('The modifier removes the entire subject. Try a smaller scale or another placement.');
   const allPaths = [...outputSubject, ...modifier];
   const allBounds = allPaths.reduce((all, path) => all.unite(path.bounds), allPaths[0].bounds.clone());
+  const modifierOutputBounds = modifier.length ? modifier.reduce((all, path) => all.unite(path.bounds), modifier[0].bounds.clone()) : null;
   if (allBounds.left < 2 - NUMERICAL_MARGIN || allBounds.top < 2 - NUMERICAL_MARGIN ||
       allBounds.right > 22 + NUMERICAL_MARGIN || allBounds.bottom > 22 + NUMERICAL_MARGIN) {
     warnings.push('A stroke may extend outside the 1px canvas safe zone.');
   }
-  if (composition.clearance < 2) warnings.push('Lucide normally uses at least 2px between distinct elements.');
+  if (modifier.length && composition.clearance < 2) warnings.push('Lucide normally uses at least 2px between distinct elements.');
   const exclusionSvg = pathMarkup(modifier, exclusionRadius * 2);
   return {
     svg: pathMarkup(allPaths),
     subjectSvg: pathMarkup(subject),
     modifierSvg: pathMarkup(modifier),
     exclusionSvg,
+    originalSubjectPaths: subject.map(path => path.pathData),
     subjectPaths: outputSubject.map(path => path.pathData),
     modifierPaths: modifier.map(path => path.pathData),
     exclusionRadius,
+    modifierBounds: modifierOutputBounds ? { x: modifierOutputBounds.x, y: modifierOutputBounds.y,
+      width: modifierOutputBounds.width, height: modifierOutputBounds.height } : null,
     warnings,
   };
 }
