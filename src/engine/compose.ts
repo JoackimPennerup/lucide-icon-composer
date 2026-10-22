@@ -4,11 +4,16 @@ import { normalizePathData } from './pathData';
 
 export type Anchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center';
 export type CompositionMode = 'cutout' | 'overlay' | 'replace';
+export interface ElementTransform { scale: number; offsetX: number; offsetY: number; pivotX: number; pivotY: number }
+export const DEFAULT_SUBJECT_TRANSFORM: ElementTransform = { scale: 1, offsetX: 0, offsetY: 0, pivotX: 12, pivotY: 12 };
 
 export interface CompositionInput {
   subjectSvg: string;
   modifierSvg: string | null;
+  /** Legacy modifier placement, retained for existing callers. */
   placement: { anchor: Anchor; offsetX: number; offsetY: number; scale: number };
+  subjectTransform?: ElementTransform;
+  modifierTransform?: ElementTransform;
   composition: { mode: CompositionMode; clearance: number };
 }
 
@@ -22,6 +27,8 @@ export interface CompositionResult {
   modifierPaths: string[];
   exclusionRadius: number;
   modifierBounds: { x: number; y: number; width: number; height: number } | null;
+  subjectBounds: { x: number; y: number; width: number; height: number } | null;
+  transformedSubjectLength: number;
   warnings: string[];
 }
 
@@ -169,6 +176,46 @@ function extractInterval(path: Path, start: number, end: number): Path | null {
   return copy;
 }
 
+function wholePixelPoint(point: paper.Point): paper.Point {
+  return new paper.Point(Math.round(point.x), Math.round(point.y));
+}
+
+/** Retreats into a safe interval until rounding the endpoint cannot close the visible gap. */
+function snappedBoundary(path: Path, modifiers: Path[], radius: number, offset: number, direction: 1 | -1, limit: number): number | null {
+  const maxRetreat = Math.min(2.5, limit);
+  for (let retreat = 0; retreat <= maxRetreat + 1e-8; retreat += 0.05) {
+    const candidate = offset + direction * retreat;
+    const point = pointAt(path, candidate);
+    const snapped = wholePixelPoint(point);
+    if (distanceToModifier(snapped, modifiers) >= radius + 0.02) return candidate;
+  }
+  return null;
+}
+
+function snappedInterval(path: Path, modifiers: Path[], radius: number, start: number, end: number, sampleStep: number): Path | null {
+  const cutStart = start > BOUNDARY_TOLERANCE;
+  const cutEnd = end < path.length - BOUNDARY_TOLERANCE;
+  if (!cutStart && !cutEnd) return extractInterval(path, start, end);
+  let from = cutStart ? snappedBoundary(path, modifiers, radius, start, 1, end - start) : start;
+  let to = cutEnd ? snappedBoundary(path, modifiers, radius, end, -1, end - start) : end;
+  if (from === null || to === null) return null;
+  for (let attempt = 0; attempt < 24 && to - from >= MIN_FRAGMENT; attempt++) {
+    const piece = extractInterval(path, from, to);
+    if (!piece) return null;
+    if (cutStart) piece.firstSegment.point = wholePixelPoint(piece.firstSegment.point);
+    if (cutEnd) piece.lastSegment.point = wholePixelPoint(piece.lastSegment.point);
+    const count = Math.max(1, Math.ceil(piece.length / sampleStep));
+    let safe = true;
+    for (let i = 0; i <= count; i++) {
+      if (distanceToModifier(pointAt(piece, piece.length * i / count), modifiers) < radius - 0.001) { safe = false; break; }
+    }
+    if (safe && piece.length >= MIN_FRAGMENT) return piece;
+    if (cutStart) from = Math.min(from + 0.1, end);
+    if (cutEnd) to = Math.max(to - 0.1, start);
+  }
+  return null;
+}
+
 function anchorPoint(scope: Scope, anchor: Anchor): paper.Point {
   const positions: Record<Anchor, [number, number]> = {
     'top-left': [6, 6], 'top-right': [18, 6],
@@ -177,23 +224,46 @@ function anchorPoint(scope: Scope, anchor: Anchor): paper.Point {
   return new scope.Point(...positions[anchor]);
 }
 
+function applyElementTransform(scope: Scope, paths: Path[], transform: ElementTransform): void {
+  if (![transform.scale, transform.offsetX, transform.offsetY, transform.pivotX, transform.pivotY].every(Number.isFinite) ||
+      transform.scale <= 0 || transform.scale > 3 || Math.abs(transform.offsetX) > 1000 || Math.abs(transform.offsetY) > 1000 ||
+      Math.abs(transform.pivotX) > 1000 || Math.abs(transform.pivotY) > 1000) throw new Error('Invalid element transform.');
+  const pivot = new scope.Point(transform.pivotX, transform.pivotY);
+  const offset = new scope.Point(transform.offsetX, transform.offsetY);
+  for (const path of paths) {
+    // These paths have no Paper stroke style. Only their centerlines are scaled;
+    // pathMarkup supplies the final, constant 2-unit SVG stroke.
+    path.scale(transform.scale, pivot);
+    path.translate(offset);
+  }
+}
+
+function boundsOf(paths: Path[]) {
+  if (!paths.length) return null;
+  const bounds = paths.reduce((all, path) => all.unite(path.bounds), paths[0].bounds.clone());
+  return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+}
+
 /** Pure input/output composition; PaperScope and all geometry are local to each call. */
 export function composeIcon(input: CompositionInput, options: { preview?: boolean } = {}): CompositionResult {
-  const { placement, composition } = input;
-  if (!Number.isFinite(placement.scale) || placement.scale <= 0 || placement.scale > 3) throw new Error('Scale must be between 0 and 3.');
+  const { composition } = input;
   if (!Number.isFinite(composition.clearance) || composition.clearance < 0 || composition.clearance > 4) throw new Error('Clearance must be between 0 and 4.');
-  if (!Number.isFinite(placement.offsetX) || !Number.isFinite(placement.offsetY)) throw new Error('Offsets must be finite.');
   const scope = new paper.PaperScope();
   scope.setup(new scope.Size(24, 24));
   const subject = parseLucideSvg(scope, input.subjectSvg);
   const modifier = input.modifierSvg ? parseLucideSvg(scope, input.modifierSvg) : [];
-  if (modifier.length) {
+  applyElementTransform(scope, subject, input.subjectTransform ?? DEFAULT_SUBJECT_TRANSFORM);
+  const transformedSubjectLength = subject.reduce((total, path) => total + path.length, 0);
+  const subjectBounds = boundsOf(subject);
+  if (modifier.length && input.modifierTransform) applyElementTransform(scope, modifier, input.modifierTransform);
+  else if (modifier.length && input.placement) {
+    const placement = input.placement;
+    if (!Number.isFinite(placement.scale) || placement.scale <= 0 || placement.scale > 3 ||
+        !Number.isFinite(placement.offsetX) || !Number.isFinite(placement.offsetY)) throw new Error('Invalid modifier placement.');
     const bounds = modifier.reduce((all, path) => all.unite(path.bounds), modifier[0].bounds.clone());
     const target = anchorPoint(scope, placement.anchor).add(new scope.Point(placement.offsetX, placement.offsetY));
-    for (const path of modifier) {
-      path.scale(placement.scale, bounds.center);
-      path.translate(target.subtract(bounds.center));
-    }
+    applyElementTransform(scope, modifier, { scale: placement.scale, pivotX: bounds.center.x, pivotY: bounds.center.y,
+      offsetX: target.x - bounds.center.x, offsetY: target.y - bounds.center.y });
   }
 
   const warnings: string[] = [];
@@ -213,17 +283,17 @@ export function composeIcon(input: CompositionInput, options: { preview?: boolea
     for (const path of subject) {
       const intervals = safeIntervals(path, modifier, exclusionRadius, sampleStep);
       for (const [start, end] of intervals) {
-        const piece = extractInterval(path, start, end);
+        const piece = snappedInterval(path, modifier, exclusionRadius, start, end, sampleStep);
         if (piece && (piece.length >= MIN_FRAGMENT || path.length <= MIN_FRAGMENT)) outputSubject.push(piece);
       }
     }
   }
   if (outputSubject.length === 0) warnings.push('The modifier removes the entire subject. Try a smaller scale or another placement.');
   const allPaths = [...outputSubject, ...modifier];
-  const allBounds = allPaths.reduce((all, path) => all.unite(path.bounds), allPaths[0].bounds.clone());
-  const modifierOutputBounds = modifier.length ? modifier.reduce((all, path) => all.unite(path.bounds), modifier[0].bounds.clone()) : null;
-  if (allBounds.left < 2 - NUMERICAL_MARGIN || allBounds.top < 2 - NUMERICAL_MARGIN ||
-      allBounds.right > 22 + NUMERICAL_MARGIN || allBounds.bottom > 22 + NUMERICAL_MARGIN) {
+  const allBounds = allPaths.length ? allPaths.reduce((all, path) => all.unite(path.bounds), allPaths[0].bounds.clone()) : null;
+  const modifierOutputBounds = boundsOf(modifier);
+  if (allBounds && (allBounds.left < 2 - NUMERICAL_MARGIN || allBounds.top < 2 - NUMERICAL_MARGIN ||
+      allBounds.right > 22 + NUMERICAL_MARGIN || allBounds.bottom > 22 + NUMERICAL_MARGIN)) {
     warnings.push('A stroke may extend outside the 1px canvas safe zone.');
   }
   if (modifier.length && composition.clearance < 2) warnings.push('Lucide normally uses at least 2px between distinct elements.');
@@ -237,8 +307,9 @@ export function composeIcon(input: CompositionInput, options: { preview?: boolea
     subjectPaths: outputSubject.map(path => path.pathData),
     modifierPaths: modifier.map(path => path.pathData),
     exclusionRadius,
-    modifierBounds: modifierOutputBounds ? { x: modifierOutputBounds.x, y: modifierOutputBounds.y,
-      width: modifierOutputBounds.width, height: modifierOutputBounds.height } : null,
+    modifierBounds: modifierOutputBounds,
+    subjectBounds,
+    transformedSubjectLength,
     warnings,
   };
 }

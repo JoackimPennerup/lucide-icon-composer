@@ -46,4 +46,20 @@ describe('Lucide guideline validation', () => {
     const issues = validateComposition(input, composeIcon(input));
     expect(issues.some(issue => issue.id.startsWith('short-'))).toBe(false);
   });
+
+  it('warns about transformed small corners and strokes outside the canvas', () => {
+    const input = model(svg('<rect x="2" y="2" width="20" height="20" rx="1.5"/>'));
+    input.modifierSvg = null;
+    input.subjectTransform = { scale: 0.5, offsetX: 14, offsetY: 0, pivotX: 12, pivotY: 12 };
+    const issues = validateComposition(input, composeIcon(input));
+    expect(issues.some(issue => issue.id === 'small-corners' && issue.level === 'warning')).toBe(true);
+    expect(issues.some(issue => issue.id.startsWith('canvas-') && issue.target?.layer === 'subject')).toBe(true);
+  });
+
+  it('detects tight curved path corners after scaling', () => {
+    const input = model(svg('<path d="M8 10 Q8 8 10 8"/>'));
+    input.modifierSvg = null;
+    input.subjectTransform = { scale: 0.5, offsetX: 0, offsetY: 0, pivotX: 12, pivotY: 12 };
+    expect(validateComposition(input, composeIcon(input)).some(issue => issue.id === 'small-corners')).toBe(true);
+  });
 });

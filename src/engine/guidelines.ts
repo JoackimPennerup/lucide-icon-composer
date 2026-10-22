@@ -66,6 +66,9 @@ export function validateComposition(input: CompositionInput, result: Composition
     } else if (layer === 'subject' && path.length < 0.75 && !result.originalSubjectPaths.includes(result.subjectPaths[pathIndex])) {
       issues.push({ id: `short-${index}`, level: 'warning', title: 'Tiny stroke fragment', explanation: `A ${path.length.toFixed(2)}px fragment may disappear at actual size.`, target });
     }
+    if (path.bounds.left < 1 - 0.01 || path.bounds.top < 1 - 0.01 || path.bounds.right > 23 + 0.01 || path.bounds.bottom > 23 + 0.01) {
+      issues.push({ id: `canvas-${index}`, level: 'warning', title: 'Stroke extends beyond the canvas', explanation: 'The final 2px stroke crosses the 24×24 canvas edge.', target });
+    }
     if (path.bounds.left < 2 - 0.01 || path.bounds.top < 2 - 0.01 || path.bounds.right > 22 + 0.01 || path.bounds.bottom > 22 + 0.01) {
       issues.push({ id: `bounds-${index}`, level: 'warning', title: 'Stroke enters the safe zone', explanation: 'A 2px centered stroke should keep its centerline inside 2–22 for 1px of canvas padding.', target });
     }
@@ -79,16 +82,39 @@ export function validateComposition(input: CompositionInput, result: Composition
     const fraction = visibleWidth * visibleHeight / Math.max(0.01, (b.width + 2) * (b.height + 2));
     if (fraction < 0.05) issues.push({ id: 'modifier-outside', level: 'warning', title: 'Modifier is outside the canvas', explanation: 'Move the modifier back onto the 24×24 artboard.' });
     else if (fraction < 0.5) issues.push({ id: 'modifier-clipped', level: 'warning', title: 'Modifier is mostly off canvas', explanation: 'Much of the modifier will be clipped in the exported icon.' });
-    if (input.placement.scale < 0.25) issues.push({ id: 'small-modifier', level: 'suggestion', title: 'Modifier is very small', explanation: 'Review its weight at 16px and 24px before exporting.' });
+    if ((input.modifierTransform?.scale ?? input.placement?.scale ?? 1) < 0.25) issues.push({ id: 'small-modifier', level: 'suggestion', title: 'Modifier is very small', explanation: 'Review its weight at 16px and 24px before exporting.' });
   }
   try {
     const sourceScope = new paper.PaperScope();
     sourceScope.setup(new sourceScope.Size(24, 24));
     const source = parseLucideSvg(sourceScope, input.subjectSvg);
-    const sourceLength = source.reduce((sum, path) => sum + path.length, 0);
+    const sourceLength = result.transformedSubjectLength;
     const remainingLength = subjects.reduce((sum, path) => sum + path.length, 0);
     if (sourceLength > 0 && remainingLength / sourceLength < 0.5) issues.push({ id: 'silhouette', level: 'suggestion', title: 'Much of the subject silhouette is gone', explanation: 'Check whether the subject remains recognizable at actual size.', target: { layer: 'subject', indices: subjects.map((_, index) => index) } });
     if (subjects.length > source.length + 2) issues.push({ id: 'disconnected', level: 'suggestion', title: 'Subject split into several pieces', explanation: 'Check that no small detail looks unintentionally detached.', target: { layer: 'subject', indices: subjects.map((_, index) => index) } });
   } catch { /* Source parse issues are already reported. */ }
+  const scale = input.subjectTransform?.scale ?? 1;
+  if (scale < 0.75) {
+    const details = subjects.flatMap((path, index) => path.curves
+      .filter(curve => curve.length > 0.01 && curve.length < 1.25)
+      .map(() => index));
+    if (details.length) issues.push({ id: 'small-details', level: 'suggestion', title: 'Subject details may be hard to read',
+      explanation: 'Some transformed segments are shorter than 1.25px. Check the icon at 16px and 24px.',
+      target: { layer: 'subject', indices: [...new Set(details)] } });
+  }
+  try {
+    const primitiveCorner = parseStrictSvg(input.subjectSvg).some(({ tag, attrs }) =>
+      (tag === 'rect' && ['rx', 'ry'].some(key => Number(attrs[key]) > 0 && Number(attrs[key]) * scale < 1)) ||
+      (tag === 'circle' && Number(attrs.r) > 0 && Number(attrs.r) * scale < 1));
+    const transformed = parseLucideSvg(scope, result.subjectSvg);
+    const curvedCorner = transformed.some(path => path.curves.some(curve =>
+      curve.length > 0.2 && (curve.handle1.length > 0.001 || curve.handle2.length > 0.001) &&
+      [0.25, 0.5, 0.75].some(time => Math.abs(curve.getCurvatureAtTime(time)) > 1)));
+    if (primitiveCorner || curvedCorner) issues.push({ id: 'small-corners', level: 'warning', title: 'Rounded corners are very small',
+      explanation: 'A scaled radius is under 1 unit, smaller than the 2-unit stroke radius.' });
+  } catch { /* Source errors are reported above. */ }
+  const visibleLength = paths.reduce((sum, path) => sum + path.length, 0);
+  if (visibleLength > 170) issues.push({ id: 'visual-density', level: 'suggestion', title: 'High visual density',
+    explanation: 'Many stroke segments share the 24px canvas. Review the icon at actual size.' });
   return issues;
 }

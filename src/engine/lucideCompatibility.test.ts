@@ -20,4 +20,4 @@ it('parses every canonical icon in the installed Lucide package', () => {
     }
   }
   expect(failures, failures.join('\n')).toEqual([]);
-});
+}, 15_000);

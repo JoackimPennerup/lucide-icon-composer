@@ -106,7 +106,7 @@ test('editable JSON reopens and clean SVG downloads', async ({ page }) => {
   const jsonDownload = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save editable JSON' }).click()]);
   const json = await readFile(await jsonDownload[0].path(), 'utf8');
   const installed = JSON.parse(await readFile('node_modules/lucide-static/package.json', 'utf8'));
-  expect(JSON.parse(json)).toMatchObject({ version: 3, lucideVersion: installed.version, subject: { name: 'folder' }, modifier: { name: 'check' } });
+  expect(JSON.parse(json)).toMatchObject({ version: 4, lucideVersion: installed.version, subject: { name: 'folder' }, modifier: { name: 'check' } });
   await page.getByRole('button', { name: 'Remove modifier' }).click();
   await page.locator('input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await expect(page.locator('[data-drag-modifier]')).toHaveCount(1);
@@ -227,4 +227,87 @@ test('actual-size previews reflect manual placement, scale, and light or dark ba
   await expect(page.locator('.actual-row')).toHaveScreenshot('preview-light-adjusted.png');
   await page.getByRole('button', { name: 'Light background' }).click();
   await expect(page.locator('.actual-row')).toHaveScreenshot('preview-dark-adjusted.png');
+});
+
+test('subject drag snaps, numeric position stays synchronized, and undo and redo restore it', async ({ page }) => {
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await page.getByRole('button', { name: 'Pan', exact: true }).click();
+  const panStart = await point(page, 8, 8);
+  await page.mouse.move(panStart.x, panStart.y); await page.mouse.down();
+  await page.mouse.move(panStart.x + 35, panStart.y - 20, { steps: 3 }); await page.mouse.up();
+  await page.getByRole('button', { name: 'Pan', exact: true }).click();
+  const start = await point(page, 8, 8);
+  const end = await point(page, 9.2, 7.7);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: 'Subject', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByLabel('X position')).toHaveValue('13');
+  await expect(page.getByLabel('Y position')).toHaveValue('12');
+  await page.getByLabel('X position').fill('13.5');
+  await expect(page.locator('.canvas-footer')).toContainText('13.50');
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.getByLabel('X position')).toHaveValue('13');
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.getByLabel('X position')).toHaveValue('12');
+  await page.getByRole('button', { name: 'Redo' }).click();
+  await expect(page.getByLabel('X position')).toHaveValue('13');
+  await page.locator('.editor-svg').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByLabel('X position')).toHaveValue('14');
+});
+
+test('subject and modifier transforms persist and export as constant-width geometry', async ({ page }) => {
+  await page.getByRole('button', { name: 'Subject', exact: true }).click();
+  await page.getByLabel('Subject scale').fill('0.7');
+  await page.getByLabel('X position').fill('11.5');
+  await page.getByRole('button', { name: 'Modifier', exact: true }).click();
+  await page.getByLabel('X position').fill('19');
+  const [svgDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download SVG' }).click()]);
+  const exported = await readFile(await svgDownload.path(), 'utf8');
+  expect(exported).toContain('viewBox="0 0 24 24"');
+  expect(exported).toContain('stroke-width="2"');
+  expect(exported).not.toMatch(/<(g|mask|clipPath|image)\b/i);
+  const [jsonDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save editable JSON' }).click()]);
+  const json = await readFile(await jsonDownload.path(), 'utf8');
+  expect(JSON.parse(json)).toMatchObject({ version: 4, subjectTransform: { scale: 0.7, offsetX: -0.5 }, modifierTransform: { offsetX: 7 } });
+  await page.getByRole('button', { name: 'Subject', exact: true }).click();
+  await page.getByRole('button', { name: 'Reset Transform' }).click();
+  await expect(page.getByLabel('Subject scale')).toHaveValue('1');
+  await page.locator('input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await page.getByRole('button', { name: 'Subject', exact: true }).click();
+  await expect(page.getByLabel('Subject scale')).toHaveValue('0.7');
+  await expect(page.getByLabel('X position')).toHaveValue('11.5');
+});
+
+test('scale sliders use geometry pixels by default and Alt allows fine adjustment', async ({ page }) => {
+  await page.getByRole('button', { name: 'Subject', exact: true }).click();
+  const subjectScale = page.getByLabel('Subject scale');
+  await subjectScale.fill('0.83');
+  await expect(subjectScale).toHaveValue('0.85'); // file source is 20 units tall: 17 whole units
+  await page.keyboard.down('Alt');
+  await subjectScale.fill('0.833');
+  await expect(subjectScale).toHaveValue('0.833');
+  await page.keyboard.up('Alt');
+  await subjectScale.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(subjectScale).toHaveValue('0.9');
+  await page.getByRole('button', { name: 'Modifier', exact: true }).click();
+  const modifierScale = page.getByLabel('Modifier scale');
+  await modifierScale.fill('0.63');
+  const scaledSpan = Number(await modifierScale.inputValue()) * 14; // plus source spans 14 units
+  expect(scaledSpan).toBeCloseTo(Math.round(scaledSpan), 6);
+});
+
+test('choosing a new modifier snaps its retained scale to the new icon geometry', async ({ page }) => {
+  await expect(page.getByLabel('Modifier scale')).toHaveValue('0.45');
+  await selectIcon(page, 'modifier', 'minus', 'Minus');
+  const scale = Number(await page.getByLabel('Modifier scale').inputValue());
+  expect(scale * 14).toBeCloseTo(6, 6); // minus is 14 geometry units wide
+  await expect(page.getByLabel('X position')).toHaveValue('18');
+  await expect(page.getByLabel('Y position')).toHaveValue('18');
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.getByLabel('Modifier scale')).toHaveValue('0.45');
+  await expect(page.getByRole('button', { name: /Choose modifier icon/ })).toContainText('Plus');
 });

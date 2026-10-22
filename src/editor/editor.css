@@ -54,3 +54,8 @@
 .composition-error-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:30px;text-align:center;background:#edf2eff0;color:#763c36;pointer-events:none}
 .composition-error-overlay strong{font-size:16px}
 .composition-error-overlay span{max-width:360px;font-size:12px;line-height:1.5}
+.subject-hit{fill:#223a2f;fill-opacity:.001;cursor:move}
+.canvas-subject,.canvas-modifier{cursor:move}
+.selection-indicator rect{fill:none;stroke:#223a2f;stroke-width:.075;stroke-dasharray:.3 .2}
+.selection-indicator circle{fill:#15966c;stroke:#fff;stroke-width:.08}
+.selection-indicator.subject circle{fill:#223a2f}

@@ -80,7 +80,38 @@ describe('SVG composition geometry', () => {
     const modifier = paths.at(-1)!;
     const edgeGap = leftEndpoint.getDistance(modifier.getNearestPoint(leftEndpoint)) - 2;
     expect(edgeGap).toBeGreaterThanOrEqual(2);
-    expect(edgeGap).toBeLessThan(2.04);
+    expect(edgeGap).toBeLessThanOrEqual(3);
+    expect(leftEndpoint.x).toBe(Math.round(leftEndpoint.x));
+    expect(leftEndpoint.y).toBe(Math.round(leftEndpoint.y));
+  });
+
+  it('snaps cut endpoints to the whole-pixel grid after independent transforms', () => {
+    const model = input(svg(line(2, 12, 22, 12)), svg(line(12, 2, 12, 22)));
+    model.subjectTransform = { scale: 0.8, offsetX: 1, offsetY: 0, pivotX: 12, pivotY: 12 };
+    model.modifierTransform = { scale: 0.6, offsetX: 1, offsetY: 0, pivotX: 12, pivotY: 12 };
+    const result = composeIcon(model);
+    const scope = new paper.PaperScope();
+    scope.setup(new scope.Size(24, 24));
+    const cutPaths = parseLucideSvg(scope, result.svg).slice(0, result.subjectPaths.length);
+    expect(cutPaths).toHaveLength(2);
+    for (const endpoint of [cutPaths[0].lastSegment.point, cutPaths[1].firstSegment.point]) {
+      expect(endpoint.x).toBe(Math.round(endpoint.x));
+      expect(endpoint.y).toBe(Math.round(endpoint.y));
+    }
+    assertVisibleGap(result, 2);
+  });
+
+  it('snaps curved cut endpoints without breaking the requested stroke clearance', () => {
+    const result = composeIcon(input(svg('<path d="M2 12 Q12 2 22 12"/>'), svg(line(12, 2, 12, 22))));
+    const scope = new paper.PaperScope();
+    scope.setup(new scope.Size(24, 24));
+    const parts = parseLucideSvg(scope, result.svg).slice(0, result.subjectPaths.length);
+    expect(parts).toHaveLength(2);
+    for (const point of [parts[0].lastSegment.point, parts[1].firstSegment.point]) {
+      expect(point.x).toBe(Math.round(point.x));
+      expect(point.y).toBe(Math.round(point.y));
+    }
+    assertVisibleGap(result, 2);
   });
 
   it('removes tiny fragments and fully covered paths', () => {
@@ -116,6 +147,29 @@ describe('SVG composition geometry', () => {
     expect(scaled.svg).toContain('stroke-width="2"');
     expect(scaled.modifierBounds?.height).toBeCloseTo((full.modifierBounds?.height ?? 0) / 2, 3);
     assertVisibleGap(scaled, 1.5);
+  });
+
+  it('scales subject geometry around its pivot while preserving the 2-unit stroke', () => {
+    const model = input(svg(line(4, 12, 20, 12)), svg(line(12, 4, 12, 20)));
+    model.modifierSvg = null;
+    model.subjectTransform = { scale: 0.5, offsetX: 2, offsetY: -1, pivotX: 12, pivotY: 12 };
+    const result = composeIcon(model);
+    expect(result.svg).toContain('stroke-width="2"');
+    expect(result.svg).not.toContain('<g');
+    expect(result.subjectPaths[0]).toContain('M10,11');
+    expect(result.subjectBounds?.width).toBeCloseTo(8);
+    expect(model.subjectSvg).toContain('x1="4"');
+  });
+
+  it('transforms both elements before cutting and keeps the final visible gap', () => {
+    const model = input(svg(line(2, 12, 22, 12)), svg(line(12, 2, 12, 22)));
+    model.subjectTransform = { scale: 0.8, offsetX: 1, offsetY: -1, pivotX: 12, pivotY: 12 };
+    model.modifierTransform = { scale: 0.6, offsetX: 3, offsetY: 0.5, pivotX: 12, pivotY: 12 };
+    const result = composeIcon(model);
+    expect(result.subjectPaths.length).toBeGreaterThan(1);
+    expect(result.modifierBounds?.height).toBeCloseTo(12);
+    assertVisibleGap(result, 2);
+    expect(composeIcon(model).svg).toBe(result.svg);
   });
 
   it('keeps the temporary drag preview stroke-aware without changing exact output', () => {

@@ -1,13 +1,15 @@
 import paper from 'paper';
-import { parseLucideSvg, type Anchor, type CompositionInput } from '../engine/compose';
+import { DEFAULT_SUBJECT_TRANSFORM, parseLucideSvg, type Anchor, type CompositionInput, type ElementTransform } from '../engine/compose';
 
 export interface IconSource { name: string; svg: string }
 export interface CompositionDocument {
-  version: 3;
+  version: 4;
   lucideVersion: string;
   subject: IconSource;
   modifier: IconSource | null;
-  placement: { anchor: Anchor; x: number; y: number; scale: number };
+  subjectTransform: ElementTransform;
+  modifierTransform: ElementTransform;
+  modifierAnchor: Anchor;
   clearance: number;
   mode: 'cutout';
 }
@@ -18,18 +20,39 @@ export const anchorPositions: Record<Anchor, { x: number; y: number }> = {
   'bottom-left': { x: 6, y: 18 }, 'bottom-right': { x: 18, y: 18 }, center: { x: 12, y: 12 },
 };
 
+export function transformPosition(transform: ElementTransform) {
+  return { x: transform.pivotX + transform.offsetX, y: transform.pivotY + transform.offsetY };
+}
+
+export function withPosition(transform: ElementTransform, position: { x: number; y: number }): ElementTransform {
+  return { ...transform, offsetX: position.x - transform.pivotX, offsetY: position.y - transform.pivotY };
+}
+
+function sourceCenter(svg: string) {
+  const scope = new paper.PaperScope();
+  scope.setup(new scope.Size(24, 24));
+  const paths = parseLucideSvg(scope, svg);
+  const bounds = paths.reduce((all, path) => all.unite(path.bounds), paths[0].bounds.clone());
+  return bounds.center;
+}
+
+export function defaultModifierTransform(svg: string, position = { x: 18, y: 18 }, scale = 0.45): ElementTransform {
+  const center = sourceCenter(svg);
+  return { scale, pivotX: center.x, pivotY: center.y, offsetX: position.x - center.x, offsetY: position.y - center.y };
+}
+
 export function toCompositionInput(document: CompositionDocument): CompositionInput {
   return {
     subjectSvg: document.subject.svg,
     modifierSvg: document.modifier?.svg ?? null,
-    placement: { anchor: 'center', offsetX: document.placement.x - 12, offsetY: document.placement.y - 12, scale: document.placement.scale },
+    placement: { anchor: 'center', offsetX: 0, offsetY: 0, scale: 1 },
+    subjectTransform: document.subjectTransform,
+    modifierTransform: document.modifierTransform,
     composition: { mode: document.mode, clearance: document.clearance },
   };
 }
 
-export function serializeDocument(document: CompositionDocument): string {
-  return JSON.stringify(document, null, 2);
-}
+export function serializeDocument(document: CompositionDocument): string { return JSON.stringify(document, null, 2); }
 
 function icon(value: unknown, label: string): IconSource {
   if (!value || typeof value !== 'object') throw new Error(`${label} icon is missing.`);
@@ -41,12 +64,18 @@ function icon(value: unknown, label: string): IconSource {
   scope.setup(new scope.Size(24, 24));
   try {
     const paths = parseLucideSvg(scope, candidate.svg);
-    if (paths.some(path => !Number.isFinite(path.length) || path.length < 1e-6)) {
-      throw new Error('Geometry contains a degenerate path.');
-    }
-  }
-  catch (error) { throw new Error(`${label} SVG is unsupported: ${error instanceof Error ? error.message : 'invalid geometry'}`); }
+    if (paths.some(path => !Number.isFinite(path.length) || path.length < 1e-6)) throw new Error('Geometry contains a degenerate path.');
+  } catch (error) { throw new Error(`${label} SVG is unsupported: ${error instanceof Error ? error.message : 'invalid geometry'}`); }
   return { name: candidate.name, svg: candidate.svg };
+}
+
+function transform(value: unknown, label: string): ElementTransform {
+  if (!value || typeof value !== 'object') throw new Error(`${label} transform is missing.`);
+  const item = value as Record<string, unknown>;
+  const keys = ['scale', 'offsetX', 'offsetY', 'pivotX', 'pivotY'] as const;
+  if (keys.some(key => typeof item[key] !== 'number' || !Number.isFinite(item[key]) || Math.abs(item[key] as number) > 1000) ||
+      (item.scale as number) <= 0 || (item.scale as number) > 3) throw new Error(`${label} transform is invalid.`);
+  return Object.fromEntries(keys.map(key => [key, item[key]])) as unknown as ElementTransform;
 }
 
 /** Parses untrusted project files into a fresh, allowlisted declarative model. */
@@ -56,30 +85,34 @@ export function parseDocument(json: string): CompositionDocument {
   try { parsed = JSON.parse(json); } catch { throw new Error('Composition is not valid JSON.'); }
   if (!parsed || typeof parsed !== 'object') throw new Error('Composition JSON must contain an object.');
   const value = parsed as Record<string, unknown>;
-  if (value.version !== 1 && value.version !== 2 && value.version !== 3) throw new Error('Unsupported composition schema version.');
-  const placement = value.placement as Record<string, unknown> | undefined;
-  if (!placement) throw new Error('Composition placement is missing.');
-  const { x, y, scale } = placement;
+  if (typeof value.version !== 'number' || ![1, 2, 3, 4].includes(value.version)) throw new Error('Unsupported composition schema version.');
+  const version = value.version;
   const clearance = value.clearance;
-  if (![x, y, scale, clearance].every(item => typeof item === 'number' && Number.isFinite(item)) ||
-      Math.abs(x as number) > 1000 || Math.abs(y as number) > 1000 ||
-      (scale as number) <= 0 || (scale as number) > 3 ||
-      (clearance as number) < 0 || (clearance as number) > 4) {
-    throw new Error('Composition has invalid position, scale, or clearance.');
-  }
-  const anchor = value.version === 1 ? 'bottom-right' : placement.anchor;
-  if (!anchors.includes(anchor as Anchor)) throw new Error('Unsupported placement anchor.');
-  if (value.version !== 1 && value.mode !== 'cutout') throw new Error('Unsupported composition mode.');
-  if (value.version === 3 && (typeof value.lucideVersion !== 'string' || !value.lucideVersion.trim() || value.lucideVersion.length > 32)) {
+  if (typeof clearance !== 'number' || !Number.isFinite(clearance) || clearance < 0 || clearance > 4) throw new Error('Invalid clearance.');
+  if (version !== 1 && value.mode !== 'cutout') throw new Error('Unsupported composition mode.');
+  if (version >= 3 && (typeof value.lucideVersion !== 'string' || !value.lucideVersion.trim() || value.lucideVersion.length > 32)) {
     throw new Error('Composition Lucide version is missing.');
   }
-  return {
-    version: 3,
-    lucideVersion: value.version === 3 ? value.lucideVersion as string : 'unknown',
-    subject: icon(value.subject, 'Subject'),
-    modifier: value.modifier === null ? null : icon(value.modifier, 'Modifier'),
-    placement: { anchor: anchor as Anchor, x: x as number, y: y as number, scale: scale as number },
-    clearance: clearance as number,
-    mode: 'cutout',
-  };
+  const subject = icon(value.subject, 'Subject');
+  const modifier = value.modifier === null ? null : icon(value.modifier, 'Modifier');
+  let subjectTransform: ElementTransform;
+  let modifierTransform: ElementTransform;
+  let modifierAnchor: Anchor;
+  if (version === 4) {
+    subjectTransform = transform(value.subjectTransform, 'Subject');
+    modifierTransform = transform(value.modifierTransform, 'Modifier');
+    modifierAnchor = value.modifierAnchor as Anchor;
+  } else {
+    const placement = value.placement as Record<string, unknown> | undefined;
+    if (!placement || ![placement.x, placement.y, placement.scale].every(item => typeof item === 'number' && Number.isFinite(item)) ||
+        Math.abs(placement.x as number) > 1000 || Math.abs(placement.y as number) > 1000 ||
+        (placement.scale as number) <= 0 || (placement.scale as number) > 3) throw new Error('Invalid legacy placement.');
+    modifierAnchor = (version === 1 ? 'bottom-right' : placement.anchor) as Anchor;
+    subjectTransform = { ...DEFAULT_SUBJECT_TRANSFORM };
+    modifierTransform = defaultModifierTransform((modifier ?? subject).svg,
+      { x: placement.x as number, y: placement.y as number }, placement.scale as number);
+  }
+  if (!anchors.includes(modifierAnchor)) throw new Error('Unsupported placement anchor.');
+  return { version: 4, lucideVersion: version >= 3 ? value.lucideVersion as string : 'unknown',
+    subject, modifier, subjectTransform, modifierTransform, modifierAnchor, clearance, mode: 'cutout' };
 }
