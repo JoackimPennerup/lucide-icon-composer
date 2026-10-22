@@ -106,9 +106,9 @@ test('editable JSON reopens and clean SVG downloads', async ({ page }) => {
   const jsonDownload = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save editable JSON' }).click()]);
   const json = await readFile(await jsonDownload[0].path(), 'utf8');
   const installed = JSON.parse(await readFile('node_modules/lucide-static/package.json', 'utf8'));
-  expect(JSON.parse(json)).toMatchObject({ version: 4, lucideVersion: installed.version, subject: { name: 'folder' }, modifier: { name: 'check' } });
+  expect(JSON.parse(json)).toMatchObject({ version: 5, lucideVersion: installed.version, subject: { name: 'folder' }, modifier: { name: 'check' } });
   await page.getByRole('button', { name: 'Remove modifier' }).click();
-  await page.locator('input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await page.locator('.export-panel input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await expect(page.locator('[data-drag-modifier]')).toHaveCount(1);
   await expect(page.getByLabel('X position')).toHaveValue('17');
 });
@@ -271,11 +271,11 @@ test('subject and modifier transforms persist and export as constant-width geome
   expect(exported).not.toMatch(/<(g|mask|clipPath|image)\b/i);
   const [jsonDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save editable JSON' }).click()]);
   const json = await readFile(await jsonDownload.path(), 'utf8');
-  expect(JSON.parse(json)).toMatchObject({ version: 4, subjectTransform: { scale: 0.7, offsetX: -0.5 }, modifierTransform: { offsetX: 7 } });
+  expect(JSON.parse(json)).toMatchObject({ version: 5, subjectTransform: { scale: 0.7, offsetX: -0.5 }, modifierTransform: { offsetX: 7 } });
   await page.getByRole('button', { name: 'Subject', exact: true }).click();
   await page.getByRole('button', { name: 'Reset Transform' }).click();
   await expect(page.getByLabel('Subject scale')).toHaveValue('1');
-  await page.locator('input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await page.locator('.export-panel input[type=file]').setInputFiles({ name: 'restored.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await page.getByRole('button', { name: 'Subject', exact: true }).click();
   await expect(page.getByLabel('Subject scale')).toHaveValue('0.7');
   await expect(page.getByLabel('X position')).toHaveValue('11.5');
@@ -310,4 +310,130 @@ test('choosing a new modifier snaps its retained scale to the new icon geometry'
   await page.getByRole('button', { name: 'Undo' }).click();
   await expect(page.getByLabel('Modifier scale')).toHaveValue('0.45');
   await expect(page.getByRole('button', { name: /Choose modifier icon/ })).toContainText('Plus');
+});
+
+test('wand-sparkles parts become an editable six-element group and reopen without wand geometry', async ({ page }) => {
+  await selectIcon(page, 'subject', 'image', 'Image');
+  await page.getByRole('button', { name: /Choose modifier icon/ }).click();
+  const picker = page.getByRole('dialog', { name: 'Choose modifier icon' });
+  await picker.getByRole('searchbox', { name: 'Search modifier icons' }).fill('wand-sparkles');
+  await picker.getByRole('button', { name: 'Select parts from Wand Sparkles' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Select parts from wand-sparkles' });
+  await expect(dialog).toContainText('0 of 8 elements selected');
+  for (let index = 3; index <= 8; index++) {
+    if (index > 3) await page.keyboard.down('Shift');
+    await dialog.getByRole('button', { name: `Path ${index}`, exact: true }).click();
+    if (index > 3) await page.keyboard.up('Shift');
+  }
+  await expect(dialog).toContainText('6 of 8 elements selected');
+  await dialog.getByRole('button', { name: 'Add selected parts' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.layer-child')).toHaveCount(6);
+  await page.getByRole('button', { name: 'Ungroup' }).click();
+  await expect(page.getByRole('button', { name: 'Group elements' })).toBeVisible();
+  await page.getByRole('button', { name: 'Hide Path 3' }).click();
+  await page.getByRole('button', { name: 'Group elements' }).click();
+  await page.getByLabel('X position').fill('16');
+  page.once('dialog', prompt => prompt.accept('Placed sparkles'));
+  await page.getByRole('button', { name: 'Save as fragment' }).click();
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('lucide-icon-designer.fragments.v1') ?? '[]'));
+  expect(saved[0].groupTransform.offsetX).not.toBe(0);
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save editable JSON' }).click()]);
+  const json = await readFile(await download.path(), 'utf8');
+  expect(JSON.parse(json).layers[0].parts).toHaveLength(6);
+  expect(JSON.parse(json).layers[0].parts[0].visible).toBe(false);
+  await page.locator('.export-panel input[type=file]').setInputFiles({ name: 'sparkles.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await expect(page.locator('.layer-child')).toHaveCount(6);
+  const [svgDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download SVG' }).click()]);
+  const svg = await readFile(await svgDownload.path(), 'utf8');
+  expect(svg).toContain('viewBox="0 0 24 24"');
+  expect(svg).toContain('stroke-width="2"');
+  expect(svg).not.toMatch(/<mask|<clipPath|<g |transform=|21\.64/);
+});
+
+test('part selector supports canvas click, Shift selection, marquee and Escape', async ({ page }) => {
+  await page.getByRole('button', { name: /Choose modifier icon/ }).click();
+  const picker = page.getByRole('dialog', { name: 'Choose modifier icon' });
+  await picker.getByRole('searchbox', { name: 'Search modifier icons' }).fill('wand-sparkles');
+  await picker.getByRole('button', { name: 'Select parts from Wand Sparkles' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Select parts from wand-sparkles' });
+  const svg = dialog.locator('.parts-canvas-wrap svg');
+  const matrix = await svg.evaluate(element => {
+    const m = (element as SVGSVGElement).getScreenCTM()!;
+    return { a: m.a, b: m.b, c: m.c, d: m.d, e: m.e, f: m.f };
+  });
+  const at = (x: number, y: number) => ({ x: matrix.a * x + matrix.c * y + matrix.e, y: matrix.b * x + matrix.d * y + matrix.f });
+  const direct = at(5, 5);
+  await page.mouse.click(direct.x, direct.y);
+  await expect(dialog.getByRole('button', { name: 'Path 3' })).toHaveAttribute('aria-pressed', 'true');
+  await page.keyboard.down('Shift');
+  await dialog.getByRole('button', { name: 'Path 4' }).click();
+  await page.keyboard.up('Shift');
+  await expect(dialog).toContainText('2 of 8 elements selected');
+  await dialog.getByRole('button', { name: 'Invert Selection' }).click();
+  await expect(dialog).toContainText('6 of 8 elements selected');
+  await dialog.getByRole('button', { name: 'Clear Selection' }).click();
+  const start = at(-1, -1); const end = at(12, 12);
+  await page.mouse.move(start.x, start.y); await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 5 }); await page.mouse.up();
+  expect(await dialog.locator('.parts-list button[aria-pressed="true"]').count()).toBeGreaterThan(0);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+});
+
+test('saved fragments persist locally and can be reused, renamed, exported and imported', async ({ page }) => {
+  await page.getByRole('button', { name: /Choose modifier icon/ }).click();
+  const picker = page.getByRole('dialog', { name: 'Choose modifier icon' });
+  await picker.getByRole('searchbox', { name: 'Search modifier icons' }).fill('wand-sparkles');
+  await picker.getByRole('button', { name: 'Select parts from Wand Sparkles' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Select parts from wand-sparkles' });
+  await dialog.getByRole('button', { name: 'Path 3' }).click();
+  await page.keyboard.down('Shift');
+  await dialog.getByRole('button', { name: 'Path 4' }).click();
+  await page.keyboard.up('Shift');
+  page.once('dialog', prompt => prompt.accept('Two sparkles'));
+  await dialog.getByRole('button', { name: 'Save fragment' }).click();
+  await expect(page.locator('.fragment-entry')).toHaveCount(1);
+  await page.reload();
+  await expect(page.locator('.fragment-entry')).toContainText('Two sparkles');
+  await page.locator('.fragment-entry').getByRole('button', { name: 'Add' }).click();
+  await expect(page.locator('.layer-child')).toHaveCount(2);
+  page.once('dialog', prompt => prompt.accept('Sparkle pair'));
+  await page.locator('.fragment-entry').getByRole('button', { name: 'Rename' }).click();
+  await expect(page.locator('.fragment-entry')).toContainText('Sparkle pair');
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export fragments' }).click()]);
+  const json = await readFile(await download.path(), 'utf8');
+  expect(JSON.parse(json)[0].parts).toHaveLength(2);
+  await page.locator('.fragment-entry').getByRole('button', { name: 'Delete' }).click();
+  await expect(page.locator('.fragment-entry')).toHaveCount(0);
+  await page.locator('.fragment-panel input[type=file]').setInputFiles({ name: 'fragments.json', mimeType: 'application/json', buffer: Buffer.from(json) });
+  await expect(page.locator('.fragment-entry')).toContainText('Sparkle pair');
+});
+
+test('ungrouped elements can form a new group while other elements stay editable', async ({ page }) => {
+  await page.getByRole('button', { name: /Choose modifier icon/ }).click();
+  const picker = page.getByRole('dialog', { name: 'Choose modifier icon' });
+  await picker.getByRole('searchbox', { name: 'Search modifier icons' }).fill('wand-sparkles');
+  await picker.getByRole('button', { name: 'Select parts from Wand Sparkles' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Select parts from wand-sparkles' });
+  for (let index = 3; index <= 8; index++) {
+    if (index > 3) await page.keyboard.down('Shift');
+    await dialog.getByRole('button', { name: `Path ${index}`, exact: true }).click();
+    if (index > 3) await page.keyboard.up('Shift');
+  }
+  await dialog.getByRole('button', { name: 'Add selected parts' }).click();
+  await page.getByRole('button', { name: 'Ungroup' }).click();
+  await page.locator('.layer-child').filter({ hasText: 'Path 3' }).getByRole('button', { name: 'Path 3', exact: true }).click();
+  await page.keyboard.down('Shift');
+  await page.locator('.layer-child').filter({ hasText: 'Path 4' }).getByRole('button', { name: 'Path 4', exact: true }).click();
+  await page.keyboard.up('Shift');
+  await page.getByRole('button', { name: 'Group selected (2)' }).click();
+  await expect(page.locator('.layer-child')).toHaveCount(6);
+  await expect(page.locator('.layer-entry').filter({ hasText: 'wand-sparkles group' }).locator('.layer-child')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.locator('.layer-entry').filter({ hasText: 'wand-sparkles group' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Redo' }).click();
+  await expect(page.locator('.layer-entry').filter({ hasText: 'wand-sparkles group' }).locator('.layer-child')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Lock wand-sparkles group' }).click();
+  await expect(page.getByLabel('Group scale')).toBeDisabled();
 });

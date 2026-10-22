@@ -3,7 +3,7 @@ import { parseLucideSvg, type CompositionInput, type CompositionResult } from '.
 import { parseStrictSvg } from './strictSvg';
 
 export type GuidelineLevel = 'error' | 'warning' | 'suggestion';
-export type GeometryTarget = { layer: 'subject' | 'modifier'; indices: number[] };
+export type GeometryTarget = { layer: string; indices: number[] };
 export interface GuidelineIssue {
   id: string;
   level: GuidelineLevel;
@@ -47,6 +47,7 @@ function nearestGap(subjects: paper.Path[], modifiers: paper.Path[]) {
 
 /** Advisory checks never move the designer's geometry. */
 export function validateComposition(input: CompositionInput, result: CompositionResult): GuidelineIssue[] {
+  if (input.layers && result.layerPaths) return validateLayeredComposition(input, result);
   const issues = [...validateSourceSvg(input.subjectSvg, 'Subject')];
   if (input.modifierSvg) issues.push(...validateSourceSvg(input.modifierSvg, 'Modifier'));
   const scope = new paper.PaperScope();
@@ -113,6 +114,48 @@ export function validateComposition(input: CompositionInput, result: Composition
     if (primitiveCorner || curvedCorner) issues.push({ id: 'small-corners', level: 'warning', title: 'Rounded corners are very small',
       explanation: 'A scaled radius is under 1 unit, smaller than the 2-unit stroke radius.' });
   } catch { /* Source errors are reported above. */ }
+  const visibleLength = paths.reduce((sum, path) => sum + path.length, 0);
+  if (visibleLength > 170) issues.push({ id: 'visual-density', level: 'suggestion', title: 'High visual density',
+    explanation: 'Many stroke segments share the 24px canvas. Review the icon at actual size.' });
+  return issues;
+}
+
+function validateLayeredComposition(input: CompositionInput, result: CompositionResult): GuidelineIssue[] {
+  const issues: GuidelineIssue[] = [];
+  for (const layer of input.layers ?? []) {
+    if (layer.svg) issues.push(...validateSourceSvg(layer.svg, layer.id));
+    for (const part of layer.parts ?? []) issues.push(...validateSourceSvg(part.svg, part.id));
+  }
+  issues.push(...validateSourceSvg(result.svg, 'Export'));
+  const scope = new paper.PaperScope(); scope.setup(new scope.Size(24, 24));
+  const layerPaths = new Map<string, paper.Path[]>();
+  for (const layer of input.layers ?? []) {
+    const paths = (result.layerPaths?.[layer.id] ?? []).flatMap(d => parseLucideSvg(scope,
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`));
+    layerPaths.set(layer.id, paths);
+    paths.forEach((path, index) => {
+      const target = { layer: layer.id, indices: [index] };
+      if (!Number.isFinite(path.length) || path.length < 1e-6) issues.push({ id: `invalid-${layer.id}-${index}`, level: 'error', title: 'Degenerate output path', explanation: 'The output path has no usable geometry.', target });
+      else if (path.length < 0.75) issues.push({ id: `short-${layer.id}-${index}`, level: 'warning', title: 'Tiny stroke fragment', explanation: `A ${path.length.toFixed(2)}px fragment may disappear at actual size.`, target });
+      if (path.bounds.left < 1 || path.bounds.top < 1 || path.bounds.right > 23 || path.bounds.bottom > 23)
+        issues.push({ id: `canvas-${layer.id}-${index}`, level: 'warning', title: 'Stroke extends beyond canvas', explanation: 'A 2-unit stroke crosses the 24×24 canvas edge.', target });
+      else if (path.bounds.left < 2 || path.bounds.top < 2 || path.bounds.right > 22 || path.bounds.bottom > 22)
+        issues.push({ id: `safe-${layer.id}-${index}`, level: 'warning', title: 'Stroke enters safe zone', explanation: 'The centerline enters the recommended 2–22 bounds.', target });
+    });
+  }
+  for (let upperIndex = 1; upperIndex < (input.layers?.length ?? 0); upperIndex++) {
+    const upper = input.layers![upperIndex];
+    if (!upper.visible || !upper.cutout) continue;
+    const upperPaths = layerPaths.get(upper.id) ?? [];
+    for (const lower of input.layers!.slice(0, upperIndex)) {
+      const lowerPaths = layerPaths.get(lower.id) ?? [];
+      if (!lower.visible || !lowerPaths.length || !upperPaths.length) continue;
+      const gap = nearestGap(lowerPaths, upperPaths);
+      if (gap.gap < input.composition.clearance - .03) issues.push({ id: `clearance-${lower.id}-${upper.id}`, level: 'warning',
+        title: 'Visible clearance may be too small', explanation: `Measured gap between ${lower.id} and ${upper.id} is ${Math.max(0, gap.gap).toFixed(2)} units.` });
+    }
+  }
+  const paths = [...layerPaths.values()].flat();
   const visibleLength = paths.reduce((sum, path) => sum + path.length, 0);
   if (visibleLength > 170) issues.push({ id: 'visual-density', level: 'suggestion', title: 'High visual density',
     explanation: 'Many stroke segments share the 24px canvas. Review the icon at actual size.' });

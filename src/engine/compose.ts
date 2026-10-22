@@ -15,6 +15,12 @@ export interface CompositionInput {
   subjectTransform?: ElementTransform;
   modifierTransform?: ElementTransform;
   composition: { mode: CompositionMode; clearance: number };
+  layers?: LayerInput[];
+}
+
+export interface LayerInput {
+  id: string; svg?: string; transform: ElementTransform; visible: boolean; cutout: boolean;
+  parts?: { id: string; svg: string; transform: ElementTransform; visible: boolean }[];
 }
 
 export interface CompositionResult {
@@ -30,6 +36,10 @@ export interface CompositionResult {
   subjectBounds: { x: number; y: number; width: number; height: number } | null;
   transformedSubjectLength: number;
   warnings: string[];
+  layerPaths?: Record<string, string[]>;
+  layerBounds?: Record<string, { x: number; y: number; width: number; height: number } | null>;
+  partPaths?: Record<string, string[]>;
+  partBounds?: Record<string, { x: number; y: number; width: number; height: number } | null>;
 }
 
 const STROKE_WIDTH = 2;
@@ -246,6 +256,7 @@ function boundsOf(paths: Path[]) {
 
 /** Pure input/output composition; PaperScope and all geometry are local to each call. */
 export function composeIcon(input: CompositionInput, options: { preview?: boolean } = {}): CompositionResult {
+  if (input.layers) return composeLayers(input, options);
   const { composition } = input;
   if (!Number.isFinite(composition.clearance) || composition.clearance < 0 || composition.clearance > 4) throw new Error('Clearance must be between 0 and 4.');
   const scope = new paper.PaperScope();
@@ -311,5 +322,72 @@ export function composeIcon(input: CompositionInput, options: { preview?: boolea
     subjectBounds,
     transformedSubjectLength,
     warnings,
+  };
+}
+
+/** Ordered back to front; each upper cutout layer trims already composed lower geometry. */
+function composeLayers(input: CompositionInput, options: { preview?: boolean }): CompositionResult {
+  const clearance = input.composition.clearance;
+  if (!Number.isFinite(clearance) || clearance < 0 || clearance > 4) throw new Error('Clearance must be between 0 and 4.');
+  const scope = new paper.PaperScope(); scope.setup(new scope.Size(24, 24));
+  const sources: { id: string; paths: Path[]; cutout: boolean; partGroups: { id: string; paths: Path[] }[] }[] = [];
+  for (const layer of input.layers ?? []) {
+    if (!layer.visible) continue;
+    const partGroups = layer.parts?.filter(part => part.visible).map(part => {
+      const paths = parseLucideSvg(scope, part.svg);
+      applyElementTransform(scope, paths, part.transform);
+      applyElementTransform(scope, paths, layer.transform);
+      return { id: part.id, paths };
+    }) ?? [];
+    const paths = layer.parts ? partGroups.flatMap(part => part.paths) : layer.svg ? parseLucideSvg(scope, layer.svg) : [];
+    if (!layer.parts && paths.length) applyElementTransform(scope, paths, layer.transform);
+    sources.push({ id: layer.id, paths, cutout: layer.cutout, partGroups });
+  }
+  const layerPaths: Record<string, string[]> = {};
+  const layerBounds: CompositionResult['layerBounds'] = {};
+  const partPaths: Record<string, string[]> = {};
+  const partBounds: NonNullable<CompositionResult['partBounds']> = {};
+  for (const source of sources) {
+    layerBounds![source.id] = boundsOf(source.paths);
+    for (const part of source.partGroups) {
+      partPaths[part.id] = part.paths.map(path => path.pathData);
+      partBounds[part.id] = boundsOf(part.paths);
+    }
+  }
+  const output = new Map<string, Path[]>();
+  const sampleStep = options.preview ? 0.25 : SAMPLE_STEP;
+  const radius = STROKE_WIDTH + clearance + (options.preview ? 0.14 : NUMERICAL_MARGIN);
+  for (const source of sources) {
+    if (source.cutout && source.paths.length) {
+      for (const [id, existing] of output) {
+        const trimmed: Path[] = [];
+        for (const path of existing) for (const [start, end] of safeIntervals(path, source.paths, radius, sampleStep)) {
+          const piece = snappedInterval(path, source.paths, radius, start, end, sampleStep);
+          if (piece && (piece.length >= MIN_FRAGMENT || path.length <= MIN_FRAGMENT)) trimmed.push(piece);
+        }
+        output.set(id, trimmed);
+      }
+    }
+    output.set(source.id, source.paths);
+  }
+  const allPaths = [...output.values()].flat();
+  for (const [id, paths] of output) layerPaths[id] = paths.map(path => path.pathData);
+  const subject = sources.find(source => source.id === 'subject');
+  const modifier = sources.find(source => source.id === 'modifier');
+  const warnings: string[] = [];
+  const bounds = boundsOf(allPaths);
+  if (bounds && (bounds.x < 2 - NUMERICAL_MARGIN || bounds.y < 2 - NUMERICAL_MARGIN ||
+    bounds.x + bounds.width > 22 + NUMERICAL_MARGIN || bounds.y + bounds.height > 22 + NUMERICAL_MARGIN)) {
+    warnings.push('A stroke may extend outside the 1px canvas safe zone.');
+  }
+  if (sources.length > 1 && clearance < 2) warnings.push('Lucide normally uses at least 2px between distinct elements.');
+  return {
+    svg: pathMarkup(allPaths), subjectSvg: pathMarkup(subject?.paths ?? []), modifierSvg: pathMarkup(modifier?.paths ?? []),
+    exclusionSvg: pathMarkup(modifier?.paths ?? [], radius * 2),
+    originalSubjectPaths: subject?.paths.map(path => path.pathData) ?? [], subjectPaths: layerPaths.subject ?? [],
+    modifierPaths: layerPaths.modifier ?? [], exclusionRadius: radius,
+    modifierBounds: layerBounds!.modifier ?? null, subjectBounds: layerBounds!.subject ?? null,
+    transformedSubjectLength: subject?.paths.reduce((sum, path) => sum + path.length, 0) ?? 0,
+    warnings, layerPaths, layerBounds, partPaths, partBounds,
   };
 }

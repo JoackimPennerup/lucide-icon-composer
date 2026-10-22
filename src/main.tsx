@@ -5,6 +5,7 @@ import { ProofHarness } from './proof/ProofHarness';
 import { Editor } from './editor/Editor';
 import './proof/styles.css';
 import './editor/editor.css';
+import './editor/lucide-theme.css';
 
 function App() {
   const [proof, setProof] = useState(false);

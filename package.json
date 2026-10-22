@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@xmldom/xmldom": "^0.9.12",
-    "lucide-static": "1.55.0",
+    "lucide-static": "1.61.0",
     "paper": "0.12.18",
     "react": "19.3.0",
     "react-dom": "19.3.0"

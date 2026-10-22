@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { defaultModifierTransform, parseDocument, serializeDocument, toCompositionInput, type CompositionDocument } from './document';
+import { defaultBaseLayers, defaultModifierTransform, parseDocument, serializeDocument, toCompositionInput, type CompositionDocument } from './document';
 import { subjects, modifiers } from '../proof/icons';
 import { composeIcon, DEFAULT_SUBJECT_TRANSFORM } from '../engine/compose';
 
 const document: CompositionDocument = {
-  version: 4, lucideVersion: '1.55.0', subject: { name: 'file', svg: subjects.file }, modifier: { name: 'plus', svg: modifiers.plus },
+  version: 5, lucideVersion: '1.55.0', subject: { name: 'file', svg: subjects.file }, modifier: { name: 'plus', svg: modifiers.plus },
   subjectTransform: { ...DEFAULT_SUBJECT_TRANSFORM }, modifierTransform: defaultModifierTransform(modifiers.plus, { x: 18.25, y: 17.9 }, 0.42),
-  modifierAnchor: 'bottom-right', clearance: 2, mode: 'cutout',
+  modifierAnchor: 'bottom-right', clearance: 2, mode: 'cutout', layers: [], layerOrder: ['subject', 'modifier'], baseLayers: defaultBaseLayers(),
 };
 
 describe('editable composition JSON', () => {

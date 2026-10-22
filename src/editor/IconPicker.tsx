@@ -7,8 +7,8 @@ const VIEW_HEIGHT = 330;
 
 function label(name: string) { return name.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' '); }
 
-export function IconPicker({ title, selected, onChoose }: {
-  title: 'Subject' | 'Modifier'; selected: string | null; onChoose: (name: string) => void;
+export function IconPicker({ title, selected, onChoose, onSelectParts }: {
+  title: 'Subject' | 'Modifier'; selected: string | null; onChoose: (name: string) => void; onSelectParts: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [catalog, setCatalog] = useState<IconCatalog | null>(null);
@@ -100,17 +100,17 @@ export function IconPicker({ title, selected, onChoose }: {
             <div className="library-grid-space" style={{ height: Math.ceil(matches.length / COLUMNS) * ROW_HEIGHT }}>
               {visible.map((icon, visibleIndex) => {
                 const index = firstRow * COLUMNS + visibleIndex;
-                return <button key={icon.name} type="button" data-icon-index={index} className="library-icon"
-                  style={{ top: Math.floor(index / COLUMNS) * ROW_HEIGHT, left: `${(index % COLUMNS) * 25}%` }}
+                return <div key={icon.name} className="library-icon-cell" style={{ top: Math.floor(index / COLUMNS) * ROW_HEIGHT, left: `${(index % COLUMNS) * 25}%` }}><button type="button" data-icon-index={index} className="library-icon"
                   aria-label={label(icon.name)} aria-pressed={catalog?.byName.get(selected ?? '')?.name === icon.name} title={icon.name}
                   onClick={() => { onChoose(icon.name); close(); }}>
                   <img loading="lazy" alt="" src={iconUrl(icon.name)} /><span>{label(icon.name)}</span>
-                </button>;
+                </button><button type="button" className="library-parts-action" aria-label={`Select parts from ${label(icon.name)}`}
+                  onClick={() => { onSelectParts(icon.name); close(); }}>Parts</button></div>;
               })}
             </div>
           </div>}
       </>}
-      <p className="library-hint">Use search or arrow keys to explore. Enter selects; Escape closes.</p>
+      <p className="library-hint">Choose an icon or select Parts to extract source elements. Escape closes.</p>
     </div>}
   </div>;
 }

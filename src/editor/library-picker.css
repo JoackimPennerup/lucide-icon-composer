@@ -19,3 +19,7 @@
 .panel .library-icon[aria-pressed="true"] { background: #e8f6ec; border-color: #59a876; color: #174c31; }
 .library-hint { margin: 10px 1px 0; color: #75887a; font-size: 10px; }
 @media (max-width: 800px) { .library-popover { left: 0; top: calc(100% + 8px); width: min(452px, calc(100vw - 28px)); } }
+.library-icon-cell{position:absolute;width:calc(25% - 6px);height:76px;margin:3px;display:flex;flex-direction:column;gap:2px}
+.panel .library-icon-cell .library-icon{position:static;width:100%;height:54px;margin:0;padding:3px;gap:2px}
+.library-icon-cell .library-icon img{width:24px;height:24px}
+.panel .library-icon-cell .library-parts-action{height:18px;padding:0;font-size:9px;line-height:1;color:#277b52}
